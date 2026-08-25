@@ -30,8 +30,14 @@
 #include "parser/scansup.h"
 #endif
 
+#if PG_VERSION_NUM >= 190000
+#define palloc_array_checked(type, count) ((type *) palloc_array(type, count))
+#else
+#define palloc_array_checked(type, count) ((type *) palloc(mul_size(sizeof(type), count)))
+#endif
+
 #define STATE_DIMS(x) (ARR_DIMS(x)[0] - 1)
-#define CreateStateDatums(dim) palloc(sizeof(Datum) * (dim + 1))
+#define CreateStateDatums(dim) palloc_array_checked(Datum, (Size) ((dim) + 1))
 
 #if defined(USE_TARGET_CLONES) && !defined(__FMA__)
 #define VECTOR_TARGET_CLONES __attribute__((target_clones("default", "fma")))
@@ -40,7 +46,7 @@
 #endif
 
 #if PG_VERSION_NUM >= 180000
-PG_MODULE_MAGIC_EXT(.name = "vector", .version = "0.8.2");
+PG_MODULE_MAGIC_EXT(.name = "vector", .version = "0.8.6");
 #else
 PG_MODULE_MAGIC;
 #endif
@@ -123,12 +129,12 @@ Vector *
 InitVector(int dim)
 {
 	Vector	   *result;
-	int			size;
+	Size		size;
 
 	size = VECTOR_SIZE(dim);
 	result = (Vector *) palloc0(size);
 	SET_VARSIZE(result, size);
-	result->dim = dim;
+	result->dim = (int16) dim;
 
 	return result;
 }
@@ -231,7 +237,7 @@ vector_in(PG_FUNCTION_ARGS)
 		if (errno == ERANGE && isinf(val))
 			ereport(ERROR,
 					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-					 errmsg("\"%s\" is out of range for type vector", pnstrdup(pt, stringEnd - pt))));
+					 errmsg("\"%s\" is out of range for type vector", pnstrdup(pt, (Size) (stringEnd - pt)))));
 
 		CheckElement(val);
 		x[dim++] = val;
@@ -295,11 +301,11 @@ vector_out(PG_FUNCTION_ARGS)
 	 * dim * (FLOAT_SHORTEST_DECIMAL_LEN - 1) bytes for
 	 * float_to_shortest_decimal_bufn
 	 *
-	 * dim - 1 bytes for separator
+	 * max(dim - 1, 0) bytes for separator
 	 *
 	 * 3 bytes for [, ], and \0
 	 */
-	buf = (char *) palloc(FLOAT_SHORTEST_DECIMAL_LEN * dim + 2);
+	buf = (char *) palloc(add_size(mul_size(FLOAT_SHORTEST_DECIMAL_LEN, (Size) dim), 3));
 	ptr = buf;
 
 	AppendChar(ptr, '[');
@@ -372,11 +378,11 @@ vector_recv(PG_FUNCTION_ARGS)
 	StringInfo	buf = (StringInfo) PG_GETARG_POINTER(0);
 	int32		typmod = PG_GETARG_INT32(2);
 	Vector	   *result;
-	int16		dim;
-	int16		unused;
+	int			dim;
+	int			unused;
 
-	dim = pq_getmsgint(buf, sizeof(int16));
-	unused = pq_getmsgint(buf, sizeof(int16));
+	dim = (int) pq_getmsgint(buf, sizeof(int16));
+	unused = (int) pq_getmsgint(buf, sizeof(int16));
 
 	CheckDim(dim);
 	CheckExpectedDim(typmod, dim);
@@ -407,8 +413,8 @@ vector_send(PG_FUNCTION_ARGS)
 	StringInfoData buf;
 
 	pq_begintypsend(&buf);
-	pq_sendint(&buf, vec->dim, sizeof(int16));
-	pq_sendint(&buf, vec->unused, sizeof(int16));
+	pq_sendint16(&buf, (uint16) vec->dim);
+	pq_sendint16(&buf, (uint16) vec->unused);
 	for (int i = 0; i < vec->dim; i++)
 		pq_sendfloat4(&buf, vec->x[i]);
 
@@ -468,12 +474,12 @@ array_to_vector(PG_FUNCTION_ARGS)
 	if (ARR_ELEMTYPE(array) == INT4OID)
 	{
 		for (int i = 0; i < nelemsp; i++)
-			result->x[i] = DatumGetInt32(elemsp[i]);
+			result->x[i] = (float) DatumGetInt32(elemsp[i]);
 	}
 	else if (ARR_ELEMTYPE(array) == FLOAT8OID)
 	{
 		for (int i = 0; i < nelemsp; i++)
-			result->x[i] = DatumGetFloat8(elemsp[i]);
+			result->x[i] = (float) DatumGetFloat8(elemsp[i]);
 	}
 	else if (ARR_ELEMTYPE(array) == FLOAT4OID)
 	{
@@ -516,7 +522,7 @@ vector_to_float4(PG_FUNCTION_ARGS)
 	Datum	   *datums;
 	ArrayType  *result;
 
-	datums = (Datum *) palloc(sizeof(Datum) * vec->dim);
+	datums = palloc_array_checked(Datum, (Size) vec->dim);
 
 	for (int i = 0; i < vec->dim; i++)
 		datums[i] = Float4GetDatum(vec->x[i]);
@@ -799,7 +805,7 @@ l2_normalize(PG_FUNCTION_ARGS)
 	if (norm > 0)
 	{
 		for (int i = 0; i < a->dim; i++)
-			rx[i] = ax[i] / norm;
+			rx[i] = (float) (ax[i] / norm);
 
 		/* Check for overflow */
 		for (int i = 0; i < a->dim; i++)
@@ -1146,7 +1152,7 @@ vector_accum(PG_FUNCTION_ARGS)
 	ArrayType  *statearray = PG_GETARG_ARRAYTYPE_P(0);
 	Vector	   *newval = PG_GETARG_VECTOR_P(1);
 	float8	   *statevalues;
-	int16		dim;
+	int			dim;
 	bool		newarr;
 	float8		n;
 	Datum	   *statedatums;
@@ -1209,10 +1215,11 @@ vector_combine(PG_FUNCTION_ARGS)
 	ArrayType  *statearray2 = PG_GETARG_ARRAYTYPE_P(1);
 	float8	   *statevalues1;
 	float8	   *statevalues2;
-	float8		n;
 	float8		n1;
 	float8		n2;
-	int16		dim;
+	int			dim;
+	int			dim1;
+	int			dim2;
 	Datum	   *statedatums;
 	ArrayType  *result;
 
@@ -1223,41 +1230,49 @@ vector_combine(PG_FUNCTION_ARGS)
 	n1 = statevalues1[0];
 	n2 = statevalues2[0];
 
-	if (n1 == 0.0)
+	dim1 = STATE_DIMS(statearray1);
+	dim2 = STATE_DIMS(statearray2);
+
+	if (dim1 == 0 && dim2 == 0)
 	{
-		n = n2;
-		dim = STATE_DIMS(statearray2);
+		dim = 0;
 		statedatums = CreateStateDatums(dim);
-		for (int i = 1; i <= dim; i++)
-			statedatums[i] = Float8GetDatum(statevalues2[i]);
 	}
-	else if (n2 == 0.0)
+	else if (dim1 == 0)
 	{
-		n = n1;
-		dim = STATE_DIMS(statearray1);
+		dim = dim2;
+		CheckDim(dim);
 		statedatums = CreateStateDatums(dim);
-		for (int i = 1; i <= dim; i++)
-			statedatums[i] = Float8GetDatum(statevalues1[i]);
+		for (int i = 0; i < dim; i++)
+			statedatums[i + 1] = Float8GetDatum(statevalues2[i + 1]);
+	}
+	else if (dim2 == 0)
+	{
+		dim = dim1;
+		CheckDim(dim);
+		statedatums = CreateStateDatums(dim);
+		for (int i = 0; i < dim; i++)
+			statedatums[i + 1] = Float8GetDatum(statevalues1[i + 1]);
 	}
 	else
 	{
-		n = n1 + n2;
-		dim = STATE_DIMS(statearray1);
-		CheckExpectedDim(dim, STATE_DIMS(statearray2));
+		dim = dim1;
+		CheckDim(dim);
+		CheckExpectedDim(dim, dim2);
 		statedatums = CreateStateDatums(dim);
-		for (int i = 1; i <= dim; i++)
+		for (int i = 0; i < dim; i++)
 		{
-			double		v = statevalues1[i] + statevalues2[i];
+			double		v = statevalues1[i + 1] + statevalues2[i + 1];
 
 			/* Check for overflow */
 			if (isinf(v))
 				float_overflow_error();
 
-			statedatums[i] = Float8GetDatum(v);
+			statedatums[i + 1] = Float8GetDatum(v);
 		}
 	}
 
-	statedatums[0] = Float8GetDatum(n);
+	statedatums[0] = Float8GetDatum(n1 + n2);
 
 	result = construct_array(statedatums, dim + 1,
 							 FLOAT8OID,
@@ -1278,7 +1293,7 @@ vector_avg(PG_FUNCTION_ARGS)
 	ArrayType  *statearray = PG_GETARG_ARRAYTYPE_P(0);
 	float8	   *statevalues;
 	float8		n;
-	uint16		dim;
+	int			dim;
 	Vector	   *result;
 
 	/* Check array before using */
@@ -1295,7 +1310,7 @@ vector_avg(PG_FUNCTION_ARGS)
 	result = InitVector(dim);
 	for (int i = 0; i < dim; i++)
 	{
-		result->x[i] = statevalues[i + 1] / n;
+		result->x[i] = (float) (statevalues[i + 1] / n);
 		CheckElement(result->x[i]);
 	}
 
@@ -1320,7 +1335,15 @@ sparsevec_to_vector(PG_FUNCTION_ARGS)
 
 	result = InitVector(dim);
 	for (int i = 0; i < svec->nnz; i++)
-		result->x[svec->indices[i]] = values[i];
+	{
+		int32		index = svec->indices[i];
+
+		/* Safety check */
+		if (index < 0 || index >= dim)
+			elog(ERROR, "index out of bounds");
+
+		result->x[index] = values[i];
+	}
 
 	PG_RETURN_POINTER(result);
 }

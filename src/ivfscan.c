@@ -276,12 +276,13 @@ ivfflatbeginscan(Relation index, int nkeys, int norderbys)
 	if (maxProbes > lists)
 		maxProbes = lists;
 
-	so = (IvfflatScanOpaque) palloc(sizeof(IvfflatScanOpaqueData));
+	so = palloc_object(IvfflatScanOpaqueData);
 	so->typeInfo = IvfflatGetTypeInfo(index);
 	so->first = true;
 	so->probes = probes;
 	so->maxProbes = maxProbes;
 	so->dimensions = dimensions;
+	so->value = PointerGetDatum(NULL);
 
 	/* Set support functions */
 	so->procinfo = index_getprocinfo(index, 1, IVFFLAT_DISTANCE_PROC);
@@ -317,9 +318,9 @@ ivfflatbeginscan(Relation index, int nkeys, int norderbys)
 	so->bas = GetAccessStrategy(BAS_BULKREAD);
 
 	so->listQueue = pairingheap_allocate(CompareLists, scan);
-	so->listPages = palloc(maxProbes * sizeof(BlockNumber));
+	so->listPages = palloc_array_checked(BlockNumber, (Size) maxProbes);
 	so->listIndex = 0;
-	so->lists = palloc(maxProbes * sizeof(IvfflatScanList));
+	so->lists = palloc_array_checked(IvfflatScanList, (Size) maxProbes);
 
 	MemoryContextSwitchTo(oldCtx);
 
@@ -340,11 +341,17 @@ ivfflatrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int
 	pairingheap_reset(so->listQueue);
 	so->listIndex = 0;
 
+	if (so->normprocinfo != NULL && DatumGetPointer(so->value) != NULL)
+	{
+		pfree(DatumGetPointer(so->value));
+		so->value = PointerGetDatum(NULL);
+	}
+
 	if (keys && scan->numberOfKeys > 0)
-		memmove(scan->keyData, keys, scan->numberOfKeys * sizeof(ScanKeyData));
+		memmove(scan->keyData, keys, (Size) scan->numberOfKeys * sizeof(ScanKeyData));
 
 	if (orderbys && scan->numberOfOrderBys > 0)
-		memmove(scan->orderByData, orderbys, scan->numberOfOrderBys * sizeof(ScanKeyData));
+		memmove(scan->orderByData, orderbys, (Size) scan->numberOfOrderBys * sizeof(ScanKeyData));
 }
 
 /*

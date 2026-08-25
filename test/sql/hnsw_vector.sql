@@ -41,6 +41,7 @@ INSERT INTO t (val) VALUES ('[1,2,4]');
 SELECT * FROM t ORDER BY val <=> '[3,3,3]';
 SELECT COUNT(*) FROM (SELECT * FROM t ORDER BY val <=> '[0,0,0]') t2;
 SELECT COUNT(*) FROM (SELECT * FROM t ORDER BY val <=> (SELECT NULL::vector)) t2;
+SELECT * FROM t CROSS JOIN LATERAL (SELECT * FROM t t2 ORDER BY val <=> t.val LIMIT 1) t2 WHERE t.val != '[0,0,0]' ORDER BY t.val;
 
 DROP TABLE t;
 
@@ -95,23 +96,29 @@ CREATE INDEX ON t USING hnsw (val vector_l2_ops) WITH (m = 101);
 CREATE INDEX ON t USING hnsw (val vector_l2_ops) WITH (ef_construction = 3);
 CREATE INDEX ON t USING hnsw (val vector_l2_ops) WITH (ef_construction = 1001);
 CREATE INDEX ON t USING hnsw (val vector_l2_ops) WITH (m = 16, ef_construction = 31);
+CREATE INDEX ON t USING hnsw (val vector_l2_ops) WITH (m = 16, ef_construction = 32);
+DROP TABLE t;
 
 SHOW hnsw.ef_search;
-
 SET hnsw.ef_search = 0;
 SET hnsw.ef_search = 1001;
 
 SHOW hnsw.iterative_scan;
-
 SET hnsw.iterative_scan = on;
 
 SHOW hnsw.max_scan_tuples;
-
 SET hnsw.max_scan_tuples = 0;
 
 SHOW hnsw.scan_mem_multiplier;
-
 SET hnsw.scan_mem_multiplier = 0;
 SET hnsw.scan_mem_multiplier = 1001;
 
+-- dimensions
+
+CREATE TABLE t (val vector(2000));
+CREATE INDEX ON t USING hnsw (val vector_l2_ops);
+DROP TABLE t;
+
+CREATE TABLE t (val vector(2001));
+CREATE INDEX ON t USING hnsw (val vector_l2_ops);
 DROP TABLE t;

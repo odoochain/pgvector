@@ -51,7 +51,7 @@ hash_tid(ItemPointerData tid)
 	x.i = 0;
 	x.tid = tid;
 
-	return murmurhash64(x.i);
+	return (uint32) murmurhash64(x.i);
 }
 
 #define SH_PREFIX		tidhash
@@ -69,7 +69,7 @@ static uint32
 hash_pointer(uintptr_t ptr)
 {
 #if SIZEOF_VOID_P == 8
-	return murmurhash64((uint64) ptr);
+	return (uint32) murmurhash64((uint64) ptr);
 #else
 	return murmurhash32((uint32) ptr);
 #endif
@@ -90,7 +90,7 @@ static uint32
 hash_offset(Size offset)
 {
 #if SIZEOF_SIZE_T == 8
-	return murmurhash64((uint64) offset);
+	return (uint32) murmurhash64((uint64) offset);
 #else
 	return murmurhash32((uint32) offset);
 #endif
@@ -218,7 +218,7 @@ void
 HnswInitNeighbors(char *base, HnswElement element, int m, HnswAllocator * allocator)
 {
 	int			level = element->level;
-	HnswNeighborArrayPtr *neighborList = (HnswNeighborArrayPtr *) HnswAlloc(allocator, sizeof(HnswNeighborArrayPtr) * (level + 1));
+	HnswNeighborArrayPtr *neighborList = (HnswNeighborArrayPtr *) HnswAlloc(allocator, mul_size(sizeof(HnswNeighborArrayPtr), add_size((Size) level, 1)));
 
 	HnswPtrStore(base, element->neighbors, neighborList);
 
@@ -255,7 +255,7 @@ HnswInitElement(char *base, ItemPointer heaptid, int m, double ml, int maxLevel,
 	element->heaptidsLength = 0;
 	HnswAddHeapTid(element, heaptid);
 
-	element->level = level;
+	element->level = (uint8) level;
 	element->deleted = 0;
 	/* Start at one to make it easier to find issues */
 	element->version = 1;
@@ -282,7 +282,7 @@ HnswAddHeapTid(HnswElement element, ItemPointer heaptid)
 HnswElement
 HnswInitElementFromBlock(BlockNumber blkno, OffsetNumber offno)
 {
-	HnswElement element = palloc(sizeof(HnswElementData));
+	HnswElement element = palloc_object(HnswElementData);
 	char	   *base = NULL;
 
 	element->blkno = blkno;
@@ -318,7 +318,7 @@ HnswGetMetaPageInfo(Relation index, int *m, HnswElement * entryPoint)
 		if (BlockNumberIsValid(metap->entryBlkno))
 		{
 			*entryPoint = HnswInitElementFromBlock(metap->entryBlkno, metap->entryOffno);
-			(*entryPoint)->level = metap->entryLevel;
+			(*entryPoint)->level = (uint8) metap->entryLevel;
 		}
 		else
 			*entryPoint = NULL;
@@ -480,7 +480,7 @@ HnswSetNeighborTuple(char *base, HnswNeighborTuple ntup, HnswElement e, int m)
 		}
 	}
 
-	ntup->count = idx;
+	ntup->count = (uint16) idx;
 	ntup->version = e->version;
 }
 
@@ -546,6 +546,9 @@ HnswLoadElementImpl(BlockNumber blkno, OffsetNumber offno, double *distance, Hns
 
 	Assert(HnswIsElementTuple(etup));
 
+	if (unlikely(etup->deleted))
+		elog(ERROR, "cannot load deleted element");
+
 	/* Calculate distance */
 	if (distance != NULL)
 	{
@@ -593,7 +596,7 @@ GetElementDistance(char *base, HnswElement element, HnswQuery * q, HnswSupport *
 static HnswSearchCandidate *
 HnswInitSearchCandidate(char *base, HnswElement element, double distance)
 {
-	HnswSearchCandidate *sc = palloc(sizeof(HnswSearchCandidate));
+	HnswSearchCandidate *sc = palloc_object(HnswSearchCandidate);
 
 	HnswPtrStore(base, sc->element, element);
 	sc->distance = distance;
@@ -668,12 +671,14 @@ CompareFurthestCandidates(const pairingheap_node *a, const pairingheap_node *b, 
 static inline void
 InitVisited(char *base, visited_hash * v, bool inMemory, int ef, int m)
 {
+	uint32		initialElements = (uint32) ef * (uint32) m * 2;
+
 	if (!inMemory)
-		v->tids = tidhash_create(CurrentMemoryContext, ef * m * 2, NULL);
+		v->tids = tidhash_create(CurrentMemoryContext, initialElements, NULL);
 	else if (base != NULL)
-		v->offsets = offsethash_create(CurrentMemoryContext, ef * m * 2, NULL);
+		v->offsets = offsethash_create(CurrentMemoryContext, initialElements, NULL);
 	else
-		v->pointers = pointerhash_create(CurrentMemoryContext, ef * m * 2, NULL);
+		v->pointers = pointerhash_create(CurrentMemoryContext, initialElements, NULL);
 }
 
 /*
@@ -759,7 +764,7 @@ HnswLoadNeighborTids(HnswElement element, ItemPointerData *indextids, Relation i
 	Buffer		buf;
 	Page		page;
 	HnswNeighborTuple ntup;
-	int			start;
+	Size		start;
 
 	buf = ReadBuffer(index, element->neighborPage);
 	LockBuffer(buf, BUFFER_LOCK_SHARE);
@@ -778,8 +783,8 @@ HnswLoadNeighborTids(HnswElement element, ItemPointerData *indextids, Relation i
 	}
 
 	/* Copy to minimize lock time */
-	start = (element->level - lc) * m;
-	memcpy(indextids, ntup->indextids + start, lm * sizeof(ItemPointerData));
+	start = mul_size((Size) (element->level - lc), (Size) m);
+	memcpy(indextids, ntup->indextids + start, mul_size(sizeof(ItemPointerData), (Size) lm));
 
 	UnlockReleaseBuffer(buf);
 	return true;
@@ -828,7 +833,7 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
 	HnswNeighborArray *localNeighborhood = NULL;
 	Size		neighborhoodSize = 0;
 	int			lm = HnswGetLayerM(m, lc);
-	HnswUnvisited *unvisited = palloc(lm * sizeof(HnswUnvisited));
+	HnswUnvisited *unvisited = palloc_array_checked(HnswUnvisited, (Size) lm);
 	int			unvisitedLength;
 	bool		inMemory = index == NULL;
 
@@ -1044,7 +1049,7 @@ CheckElementCloser(char *base, HnswCandidate * e, List *r, HnswSupport * support
 		HnswCandidate *ri = lfirst(lc2);
 		HnswElement riElement = HnswPtrAccess(base, ri->element);
 		Datum		riValue = HnswGetValue(base, riElement);
-		float		distance = HnswGetDistance(eValue, riValue, support);
+		float		distance = (float) HnswGetDistance(eValue, riValue, support);
 
 		if (distance <= e->distance)
 			return false;
@@ -1071,7 +1076,7 @@ SelectNeighbors(char *base, List *c, int lm, HnswSupport * support, bool *closer
 	if (list_length(w) <= lm)
 		return w;
 
-	wd = palloc(sizeof(HnswCandidate *) * list_length(w));
+	wd = palloc_array_checked(HnswCandidate *, (Size) list_length(w));
 
 	/* Ensure order of candidates is deterministic for closer caching */
 	if (sortCandidates)
@@ -1325,10 +1330,10 @@ HnswFindElementNeighbors(char *base, HnswElement element, HnswElement entryPoint
 		foreach(lc2, w)
 		{
 			HnswSearchCandidate *sc = lfirst(lc2);
-			HnswCandidate *hc = palloc(sizeof(HnswCandidate));
+			HnswCandidate *hc = palloc_object(HnswCandidate);
 
 			hc->element = sc->element;
-			hc->distance = sc->distance;
+			hc->distance = (float) sc->distance;
 
 			lw = lappend(lw, hc);
 		}

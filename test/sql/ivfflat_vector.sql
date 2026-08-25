@@ -41,6 +41,7 @@ INSERT INTO t (val) VALUES ('[1,2,4]');
 SELECT * FROM t ORDER BY val <=> '[3,3,3]';
 SELECT COUNT(*) FROM (SELECT * FROM t ORDER BY val <=> '[0,0,0]') t2;
 SELECT COUNT(*) FROM (SELECT * FROM t ORDER BY val <=> (SELECT NULL::vector)) t2;
+SELECT * FROM t CROSS JOIN LATERAL (SELECT * FROM t t2 ORDER BY val <=> t.val LIMIT 1) t2 WHERE t.val != '[0,0,0]' ORDER BY t.val;
 
 DROP TABLE t;
 
@@ -81,19 +82,40 @@ DROP TABLE t;
 CREATE TABLE t (val vector(3));
 CREATE INDEX ON t USING ivfflat (val vector_l2_ops) WITH (lists = 0);
 CREATE INDEX ON t USING ivfflat (val vector_l2_ops) WITH (lists = 32769);
+DROP TABLE t;
 
 SHOW ivfflat.probes;
-
 SET ivfflat.probes = 0;
 SET ivfflat.probes = 32769;
 
 SHOW ivfflat.iterative_scan;
-
 SET ivfflat.iterative_scan = on;
 
 SHOW ivfflat.max_probes;
-
 SET ivfflat.max_probes = 0;
 SET ivfflat.max_probes = 32769;
 
+-- dimensions
+
+CREATE TABLE t (val vector(2000));
+CREATE INDEX ON t USING ivfflat (val vector_l2_ops);
 DROP TABLE t;
+
+CREATE TABLE t (val vector(2001));
+CREATE INDEX ON t USING ivfflat (val vector_l2_ops);
+DROP TABLE t;
+
+-- memory
+
+SET maintenance_work_mem = '1MB';
+CREATE TABLE t (val vector(2000));
+CREATE INDEX ON t USING ivfflat (val vector_l2_ops);
+DROP TABLE t;
+RESET maintenance_work_mem;
+
+SET maintenance_work_mem = '5MB';
+CREATE TABLE t (val vector(2000));
+INSERT INTO t (val) VALUES (array_fill(0, ARRAY[2000]));
+CREATE INDEX ON t USING ivfflat (val vector_l2_ops);
+DROP TABLE t;
+RESET maintenance_work_mem;

@@ -102,15 +102,15 @@ CreateMetaPage(HnswBuildState * buildstate)
 	metap = HnswPageGetMeta(page);
 	metap->magicNumber = HNSW_MAGIC_NUMBER;
 	metap->version = HNSW_VERSION;
-	metap->dimensions = buildstate->dimensions;
-	metap->m = buildstate->m;
-	metap->efConstruction = buildstate->efConstruction;
+	metap->dimensions = (uint32) buildstate->dimensions;
+	metap->m = (uint16) buildstate->m;
+	metap->efConstruction = (uint16) buildstate->efConstruction;
 	metap->entryBlkno = InvalidBlockNumber;
 	metap->entryOffno = InvalidOffsetNumber;
 	metap->entryLevel = -1;
 	metap->insertPage = InvalidBlockNumber;
 	((PageHeader) page)->pd_lower =
-		((char *) metap + sizeof(HnswMetaPageData)) - (char *) page;
+		(LocationIndex) (((char *) metap + sizeof(HnswMetaPageData)) - (char *) page);
 
 	MarkBufferDirty(buf);
 	UnlockReleaseBuffer(buf);
@@ -527,7 +527,7 @@ InsertTuple(Relation index, Datum *values, bool *isnull, ItemPointer heaptid, Hn
 	 * Check that we have enough memory available for the new element now that
 	 * we have the allocator lock, and flush pages if needed.
 	 */
-	if (graph->memoryUsed + memoryMargin >= graph->memoryTotal)
+	if (add_size(graph->memoryUsed, memoryMargin) >= graph->memoryTotal)
 	{
 		LWLockRelease(&graph->allocatorLock);
 
@@ -599,7 +599,7 @@ BuildCallback(Relation index, ItemPointer tid, Datum *values,
 	{
 		/* Update progress */
 		SpinLockAcquire(&graph->lock);
-		pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, ++graph->indtuples);
+		pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, (int64) ++graph->indtuples);
 		SpinLockRelease(&graph->lock);
 	}
 
@@ -662,16 +662,18 @@ HnswSharedMemoryAlloc(Size size, void *state)
 {
 	HnswBuildState *buildstate = (HnswBuildState *) state;
 	Size		alignedSize = MAXALIGN(size);
+	Size		newMemoryUsed;
 	void	   *chunk;
 
 	if (alignedSize > 1024 * 1024)
 		elog(ERROR, "hnsw allocation too large");
 
-	if (buildstate->graph->memoryUsed + alignedSize > buildstate->graph->memoryTotal)
+	newMemoryUsed = add_size(buildstate->graph->memoryUsed, alignedSize);
+	if (newMemoryUsed > buildstate->graph->memoryTotal)
 		elog(ERROR, "hnsw allocator out of memory");
 
 	chunk = buildstate->hnswarea + buildstate->graph->memoryUsed;
-	buildstate->graph->memoryUsed += alignedSize;
+	buildstate->graph->memoryUsed = newMemoryUsed;
 	return chunk;
 }
 
@@ -708,7 +710,7 @@ InitBuildState(HnswBuildState * buildstate, Relation heap, Relation index, Index
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("column cannot have more than %d dimensions for hnsw index", buildstate->typeInfo->maxDimensions)));
 
-	if (buildstate->efConstruction < 2 * buildstate->m)
+	if (buildstate->efConstruction / 2 < buildstate->m)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("ef_construction must be greater than or equal to 2 * m")));
@@ -719,7 +721,7 @@ InitBuildState(HnswBuildState * buildstate, Relation heap, Relation index, Index
 	/* Get support functions */
 	HnswInitSupport(&buildstate->support, index);
 
-	InitGraph(&buildstate->graphData, NULL, (Size) maintenance_work_mem * 1024L);
+	InitGraph(&buildstate->graphData, NULL, mul_size((Size) maintenance_work_mem, 1024));
 	buildstate->graph = &buildstate->graphData;
 	buildstate->ml = HnswGetMl(buildstate->m);
 	buildstate->maxLevel = HnswGetMaxLevel(buildstate->m);
@@ -930,9 +932,9 @@ HnswBeginParallel(HnswBuildState * buildstate, bool isconcurrent, int request)
 	Size		estother;
 	HnswShared *hnswshared;
 	char	   *hnswarea;
-	HnswLeader *hnswleader = (HnswLeader *) palloc0(sizeof(HnswLeader));
+	HnswLeader *hnswleader = palloc0_object(HnswLeader);
 	bool		leaderparticipates = true;
-	int			querylen;
+	Size		querylen;
 
 #ifdef DISABLE_LEADER_PARTICIPATION
 	leaderparticipates = false;
@@ -956,7 +958,7 @@ HnswBeginParallel(HnswBuildState * buildstate, bool isconcurrent, int request)
 	/* Leave space for other objects in shared memory */
 	/* Docker has a default limit of 64 MB for shm_size */
 	/* which happens to be the default value of maintenance_work_mem */
-	esthnswarea = maintenance_work_mem * 1024L;
+	esthnswarea = mul_size((Size) maintenance_work_mem, 1024);
 	estother = 3 * 1024 * 1024;
 	if (esthnswarea > estother)
 		esthnswarea -= estother;
@@ -1012,7 +1014,7 @@ HnswBeginParallel(HnswBuildState * buildstate, bool isconcurrent, int request)
 	 * https://github.com/postgres/postgres/commit/7201cd18627afc64850537806da7f22150d1a83b
 	 */
 #if PG_VERSION_NUM < 140005
-	hnswshared->graphData.memoryUsed += MAXALIGN(1);
+	hnswshared->graphData.memoryUsed = add_size(hnswshared->graphData.memoryUsed, MAXALIGN(1));
 #endif
 
 	shm_toc_insert(pcxt->toc, PARALLEL_KEY_HNSW_SHARED, hnswshared);
@@ -1151,7 +1153,7 @@ hnswbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
 	BuildIndex(heap, index, indexInfo, &buildstate, MAIN_FORKNUM);
 
-	result = (IndexBuildResult *) palloc(sizeof(IndexBuildResult));
+	result = palloc_object(IndexBuildResult);
 	result->heap_tuples = buildstate.reltuples;
 	result->index_tuples = buildstate.indtuples;
 

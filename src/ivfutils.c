@@ -6,7 +6,9 @@
 #include "halfutils.h"
 #include "halfvec.h"
 #include "ivfflat.h"
+#include "miscadmin.h"
 #include "storage/bufmgr.h"
+#include "utils/memutils.h"
 #include "utils/relcache.h"
 #include "utils/varbit.h"
 #include "vector.h"
@@ -21,16 +23,21 @@
 VectorArray
 VectorArrayInit(int maxlen, int dimensions, Size itemsize)
 {
-	VectorArray res = palloc(sizeof(VectorArrayData));
+	VectorArray res;
+
+	/* Safety check */
+	if (maxlen < 1 || dimensions < 1 || itemsize == 0)
+		elog(ERROR, "cannot create vector array");
 
 	/* Ensure items are aligned to prevent UB */
 	itemsize = MAXALIGN(itemsize);
 
+	res = palloc_object(VectorArrayData);
 	res->length = 0;
 	res->maxlen = maxlen;
 	res->dim = dimensions;
 	res->itemsize = itemsize;
-	res->items = palloc_extended(maxlen * itemsize, MCXT_ALLOC_ZERO | MCXT_ALLOC_HUGE);
+	res->items = palloc_extended(mul_size((Size) maxlen, itemsize), MCXT_ALLOC_ZERO | MCXT_ALLOC_HUGE);
 	return res;
 }
 
@@ -86,6 +93,40 @@ bool
 IvfflatCheckNorm(FmgrInfo *procinfo, Oid collation, Datum value)
 {
 	return DatumGetFloat8(FunctionCall1Coll(procinfo, collation, value)) > 0;
+}
+
+/*
+ * Normalize vectors
+ */
+void
+IvfflatNormVectors(const IvfflatTypeInfo * typeInfo, Oid collation, VectorArray arr, MemoryContext tmpCtx)
+{
+	MemoryContext oldCtx = MemoryContextSwitchTo(tmpCtx);
+
+	for (int i = 0; i < arr->length; i++)
+	{
+		Datum		value = PointerGetDatum(VectorArrayGet(arr, i));
+		Datum		newValue = IvfflatNormValue(typeInfo, collation, value);
+
+		VectorArraySet(arr, i, DatumGetPointer(newValue));
+		MemoryContextReset(tmpCtx);
+	}
+
+	MemoryContextSwitchTo(oldCtx);
+}
+
+/*
+ * Check memory usage
+ */
+void
+IvfflatCheckMemoryUsage(Size totalSize)
+{
+	/* Add one to error message to ceil */
+	if (totalSize / 1024 > (Size) maintenance_work_mem)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("memory required is %zu MB, maintenance_work_mem is %d MB",
+						totalSize / (1024 * 1024) + 1, maintenance_work_mem / 1024)));
 }
 
 /*
@@ -254,7 +295,7 @@ HalfvecItemSize(int dimensions)
 static Size
 BitItemSize(int dimensions)
 {
-	return VARBITTOTALLEN(dimensions);
+	return VARBITTOTALLEN((Size) dimensions);
 }
 
 static void
@@ -263,7 +304,7 @@ VectorUpdateCenter(Pointer v, int dimensions, float *x)
 	Vector	   *vec = (Vector *) v;
 
 	SET_VARSIZE(vec, VECTOR_SIZE(dimensions));
-	vec->dim = dimensions;
+	vec->dim = (int16) dimensions;
 
 	for (int i = 0; i < dimensions; i++)
 		vec->x[i] = x[i];
@@ -275,7 +316,7 @@ HalfvecUpdateCenter(Pointer v, int dimensions, float *x)
 	HalfVector *vec = (HalfVector *) v;
 
 	SET_VARSIZE(vec, HALFVEC_SIZE(dimensions));
-	vec->dim = dimensions;
+	vec->dim = (int16) dimensions;
 
 	for (int i = 0; i < dimensions; i++)
 		vec->x[i] = Float4ToHalfUnchecked(x[i]);
@@ -287,7 +328,7 @@ BitUpdateCenter(Pointer v, int dimensions, float *x)
 	VarBit	   *vec = (VarBit *) v;
 	unsigned char *nx = VARBITS(vec);
 
-	SET_VARSIZE(vec, VARBITTOTALLEN(dimensions));
+	SET_VARSIZE(vec, VARBITTOTALLEN((Size) dimensions));
 	VARBITLEN(vec) = dimensions;
 
 	for (uint32 i = 0; i < VARBITBYTES(vec); i++)

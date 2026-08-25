@@ -39,7 +39,6 @@ SELECT '[1,2,3]'::vector(16001);
 SELECT unnest('{"[1,2,3]", "[4,5,6]"}'::vector[]);
 SELECT '{"[1,2,3]"}'::vector(2)[];
 
-
 SELECT '[1,2,3]'::vector + '[4,5,6]';
 SELECT '[3e38]'::vector + '[3e38]';
 SELECT '[1,2]'::vector + '[3]';
@@ -146,7 +145,34 @@ SELECT avg(v) FROM unnest(ARRAY['[1,2,3]'::vector, '[3,5,7]', NULL]) v;
 SELECT avg(v) FROM unnest(ARRAY[]::vector[]) v;
 SELECT avg(v) FROM unnest(ARRAY['[1,2]'::vector, '[3]']) v;
 SELECT avg(v) FROM unnest(ARRAY['[3e38]'::vector, '[3e38]']) v;
+
+SELECT vector_avg('{2,2,4,6}');
+SELECT vector_avg('{0}');
+SELECT vector_avg('{1}');
+SELECT vector_avg('{{2,2,4,6}}');
+SELECT vector_avg('{NULL,2,4,6}');
+SELECT vector_avg('{}');
 SELECT vector_avg(array_agg(n)) FROM generate_series(1, 16002) n;
+
+SELECT vector_accum('{0}', '[1,2,3]');
+SELECT vector_accum('{0,0,0,0}', '[1,2,3]');
+SELECT vector_accum('{{0}}', '[1,2,3]');
+SELECT vector_accum('{NULL}', '[1,2,3]');
+SELECT vector_accum('{}', '[1,2,3]');
+SELECT vector_accum('{0,0}', '[1,2,3]');
+
+SELECT vector_combine('{1,2}', '{3,4}');
+SELECT vector_combine('{1,2}', '{3,4,5}');
+SELECT vector_combine('{{1,2}}', '{3,4}');
+SELECT vector_combine('{1,2}', '{{3,4}}');
+SELECT vector_combine('{NULL,2}', '{3,4}');
+SELECT vector_combine('{1,2}', '{3,NULL}');
+SELECT vector_combine('{}', '{0}');
+SELECT vector_combine('{0}', '{}');
+SELECT vector_combine('{0}', '{0}');
+SELECT vector_combine('{0}', (SELECT array_agg(n) FROM generate_series(1, 16002) n));
+SELECT vector_combine((SELECT array_agg(n) FROM generate_series(1, 16002) n), '{0}');
+SELECT vector_combine((SELECT array_agg(n) FROM generate_series(1, 16002) n), (SELECT array_agg(n) FROM generate_series(1, 16002) n));
 
 SELECT sum(v) FROM unnest(ARRAY['[1,2,3]'::vector, '[3,5,7]']) v;
 SELECT sum(v) FROM unnest(ARRAY['[1,2,3]'::vector, '[3,5,7]', NULL]) v;

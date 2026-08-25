@@ -18,6 +18,14 @@
 #include "utils/sampling.h"
 #include "vector.h"
 
+#if PG_VERSION_NUM < 190000
+#include "storage/shmem.h"		/* for add_size()/mul_size() in some versions */
+#endif
+
+#ifdef HNSW_BENCH
+#include "portability/instr_time.h"
+#endif
+
 #if PG_VERSION_NUM >= 190000
 typedef Pointer Item;
 #endif
@@ -70,13 +78,28 @@ typedef Pointer Item;
 #define HNSW_MAX_SIZE (BLCKSZ - MAXALIGN(SizeOfPageHeaderData) - MAXALIGN(sizeof(HnswPageOpaqueData)) - sizeof(ItemIdData))
 #define HNSW_TUPLE_ALLOC_SIZE BLCKSZ
 
-#define HNSW_ELEMENT_TUPLE_SIZE(size)	MAXALIGN(offsetof(HnswElementTupleData, data) + (size))
-#define HNSW_NEIGHBOR_TUPLE_SIZE(level, m)	MAXALIGN(offsetof(HnswNeighborTupleData, indextids) + ((level) + 2) * (m) * sizeof(ItemPointerData))
+#define HNSW_ELEMENT_TUPLE_SIZE(size)	MAXALIGN(add_size(offsetof(HnswElementTupleData, data), size))
+#define HNSW_NEIGHBOR_TUPLE_SIZE(level, m)	MAXALIGN(add_size(offsetof(HnswNeighborTupleData, indextids), mul_size(sizeof(ItemPointerData), mul_size(add_size(level, 2), (Size) (m)))))
 
-#define HNSW_NEIGHBOR_ARRAY_SIZE(lm)	(offsetof(HnswNeighborArray, items) + sizeof(HnswCandidate) * (lm))
+#define HNSW_NEIGHBOR_ARRAY_SIZE(lm)	add_size(offsetof(HnswNeighborArray, items), mul_size(sizeof(HnswCandidate), (Size) (lm)))
 
 #define HnswPageGetOpaque(page)	((HnswPageOpaque) PageGetSpecialPointer(page))
 #define HnswPageGetMeta(page)	((HnswMetaPageData *) PageGetContents(page))
+
+#ifdef HNSW_BENCH
+#define HnswBench(name, code) \
+	do { \
+		instr_time	start; \
+		instr_time	duration; \
+		INSTR_TIME_SET_CURRENT(start); \
+		(code); \
+		INSTR_TIME_SET_CURRENT(duration); \
+		INSTR_TIME_SUBTRACT(duration, start); \
+		elog(INFO, "%s: %.3f ms", name, INSTR_TIME_GET_MILLISEC(duration)); \
+	} while (0)
+#else
+#define HnswBench(name, code) (code)
+#endif
 
 #if PG_VERSION_NUM >= 150000
 #define RandomDouble() pg_prng_double(&pg_global_prng_state)
@@ -84,6 +107,17 @@ typedef Pointer Item;
 #else
 #define RandomDouble() (((double) random()) / MAX_RANDOM_VALUE)
 #define SeedRandom(seed) srandom(seed)
+#endif
+
+#if PG_VERSION_NUM < 140006
+#define palloc_object(type) ((type *) palloc(sizeof(type)))
+#define palloc0_object(type) ((type *) palloc0(sizeof(type)))
+#endif
+
+#if PG_VERSION_NUM >= 190000
+#define palloc_array_checked(type, count) ((type *) palloc_array(type, count))
+#else
+#define palloc_array_checked(type, count) ((type *) palloc(mul_size(sizeof(type), count)))
 #endif
 
 #define HnswIsElementTuple(tup) ((tup)->type == HNSW_ELEMENT_TUPLE_TYPE)
@@ -96,7 +130,7 @@ typedef Pointer Item;
 #define HnswGetMl(m) (1 / log(m))
 
 /* Ensure fits on page and in uint8 */
-#define HnswGetMaxLevel(m) Min(((BLCKSZ - MAXALIGN(SizeOfPageHeaderData) - MAXALIGN(sizeof(HnswPageOpaqueData)) - offsetof(HnswNeighborTupleData, indextids) - sizeof(ItemIdData)) / (sizeof(ItemPointerData)) / (m)) - 2, 255)
+#define HnswGetMaxLevel(m) Min(((BLCKSZ - MAXALIGN(SizeOfPageHeaderData) - MAXALIGN(sizeof(HnswPageOpaqueData)) - offsetof(HnswNeighborTupleData, indextids) - sizeof(ItemIdData)) / sizeof(ItemPointerData) / (Size) (m)) - 2, 63)
 
 #define HnswGetSearchCandidate(membername, ptr) pairingheap_container(HnswSearchCandidate, membername, ptr)
 #define HnswGetSearchCandidateConst(membername, ptr) pairingheap_const_container(HnswSearchCandidate, membername, ptr)
@@ -408,10 +442,11 @@ typedef struct HnswVacuumState
 	HnswSupport support;
 
 	/* Variables */
-	struct tidhash_hash *deleted;
+	struct tidhash_hash *deleting;
 	BufferAccessStrategy bas;
 	HnswNeighborTuple ntup;
 	HnswElementData highestPoint;
+	HnswElementData fallbackPoint;
 
 	/* Memory */
 	MemoryContext tmpCtx;
@@ -441,7 +476,7 @@ void		HnswAddHeapTid(HnswElement element, ItemPointer heaptid);
 HnswNeighborArray *HnswInitNeighborArray(int lm, HnswAllocator * allocator);
 void		HnswInitNeighbors(char *base, HnswElement element, int m, HnswAllocator * alloc);
 bool		HnswInsertTupleOnDisk(Relation index, HnswSupport * support, Datum value, ItemPointer heaptid, bool building);
-void		HnswUpdateNeighborsOnDisk(Relation index, HnswSupport * support, HnswElement e, int m, bool checkExisting, bool building);
+void		HnswUpdateNeighborsOnDisk(Relation index, HnswSupport * support, HnswElement e, int m, bool building);
 void		HnswLoadElementFromTuple(HnswElement element, HnswElementTuple etup, bool loadHeaptids, bool loadVec);
 void		HnswLoadElement(HnswElement element, double *distance, HnswQuery * q, Relation index, HnswSupport * support, bool loadVec, double *maxDistance);
 bool		HnswFormIndexValue(Datum *out, Datum *values, bool *isnull, const HnswTypeInfo * typeInfo, HnswSupport * support);

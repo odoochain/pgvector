@@ -23,7 +23,7 @@ Compile and install the extension (supports Postgres 13+)
 
 ```sh
 cd /tmp
-git clone --branch v0.8.2 https://github.com/pgvector/pgvector.git
+git clone --branch v0.8.6 https://github.com/pgvector/pgvector.git
 cd pgvector
 make
 make install # may need sudo
@@ -40,7 +40,7 @@ Ensure [C++ support in Visual Studio](https://learn.microsoft.com/en-us/cpp/buil
 ```cmd
 set "PGROOT=C:\Program Files\PostgreSQL\18"
 cd %TEMP%
-git clone --branch v0.8.2 https://github.com/pgvector/pgvector.git
+git clone --branch v0.8.6 https://github.com/pgvector/pgvector.git
 cd pgvector
 nmake /F Makefile.win
 nmake /F Makefile.win install
@@ -465,6 +465,16 @@ If filtering by many different values, consider [partitioning](https://www.postg
 CREATE TABLE items (embedding vector(3), category_id int) PARTITION BY LIST(category_id);
 ```
 
+## Multitenancy
+
+For applications with multiple tenants, sharing an approximate index between tenants means vectors from one tenant can affect recall (and speed) for other tenants.
+
+For tenant isolation, use [list partitioning](https://www.postgresql.org/docs/current/ddl-partitioning.html) or separate tables.
+
+```sql
+CREATE TABLE items (customer_id int, embedding vector(3)) PARTITION BY LIST(customer_id);
+```
+
 ## Iterative Index Scans
 
 With approximate indexes, queries with filtering can return less results since filtering is applied *after* the index is scanned. Starting with 0.8.0, you can enable iterative index scans, which will automatically scan more of the index until enough results are found (or it reaches `hnsw.max_scan_tuples` or `ivfflat.max_probes`).
@@ -713,7 +723,7 @@ To speed up queries without an index, increase `max_parallel_workers_per_gather`
 SET max_parallel_workers_per_gather = 4;
 ```
 
-If vectors are normalized to length 1 (like [OpenAI embeddings](https://platform.openai.com/docs/guides/embeddings/which-distance-function-should-i-use)), use inner product for best performance.
+If vectors are normalized to length 1 (like [OpenAI embeddings](https://platform.openai.com/docs/guides/embeddings#which-distance-function-should-i-use)), use inner product for best performance.
 
 ```tsql
 SELECT * FROM items ORDER BY embedding <#> '[3,1,2]' LIMIT 5;
@@ -971,7 +981,7 @@ cosine_distance(vector, vector) → double precision | cosine distance |
 inner_product(vector, vector) → double precision | inner product |
 l1_distance(vector, vector) → double precision | taxicab distance | 0.5.0
 l2_distance(vector, vector) → double precision | Euclidean distance |
-l2_normalize(vector) → vector | Normalize with Euclidean norm | 0.7.0
+l2_normalize(vector) → vector | normalize with Euclidean norm | 0.7.0
 subvector(vector, integer, integer) → vector | subvector | 0.7.0
 vector_dims(vector) → integer | number of dimensions |
 vector_norm(vector) → double precision | Euclidean norm |
@@ -1010,7 +1020,7 @@ inner_product(halfvec, halfvec) → double precision | inner product | 0.7.0
 l1_distance(halfvec, halfvec) → double precision | taxicab distance | 0.7.0
 l2_distance(halfvec, halfvec) → double precision | Euclidean distance | 0.7.0
 l2_norm(halfvec) → double precision | Euclidean norm | 0.7.0
-l2_normalize(halfvec) → halfvec | Normalize with Euclidean norm | 0.7.0
+l2_normalize(halfvec) → halfvec | normalize with Euclidean norm | 0.7.0
 subvector(halfvec, integer, integer) → halfvec | subvector | 0.7.0
 vector_dims(halfvec) → integer | number of dimensions | 0.7.0
 
@@ -1061,7 +1071,7 @@ inner_product(sparsevec, sparsevec) → double precision | inner product | 0.7.0
 l1_distance(sparsevec, sparsevec) → double precision | taxicab distance | 0.7.0
 l2_distance(sparsevec, sparsevec) → double precision | Euclidean distance | 0.7.0
 l2_norm(sparsevec) → double precision | Euclidean norm | 0.7.0
-l2_normalize(sparsevec) → sparsevec | Normalize with Euclidean norm | 0.7.0
+l2_normalize(sparsevec) → sparsevec | normalize with Euclidean norm | 0.7.0
 
 ## Installation Notes - Linux and Mac
 
@@ -1151,23 +1161,23 @@ This adds pgvector to the [Postgres image](https://hub.docker.com/_/postgres) (r
 
 Supported tags are:
 
-- `pg18-trixie`, `0.8.2-pg18-trixie`
-- `pg18-bookworm`, `0.8.2-pg18-bookworm`, `pg18`, `0.8.2-pg18`
-- `pg17-trixie`, `0.8.2-pg17-trixie`
-- `pg17-bookworm`, `0.8.2-pg17-bookworm`, `pg17`, `0.8.2-pg17`
-- `pg16-trixie`, `0.8.2-pg16-trixie`
-- `pg16-bookworm`, `0.8.2-pg16-bookworm`, `pg16`, `0.8.2-pg16`
-- `pg15-trixie`, `0.8.2-pg15-trixie`
-- `pg15-bookworm`, `0.8.2-pg15-bookworm`, `pg15`, `0.8.2-pg15`
-- `pg14-trixie`, `0.8.2-pg14-trixie`
-- `pg14-bookworm`, `0.8.2-pg14-bookworm`, `pg14`, `0.8.2-pg14`
-- `pg13-trixie`, `0.8.2-pg13-trixie`
-- `pg13-bookworm`, `0.8.2-pg13-bookworm`, `pg13`, `0.8.2-pg13`
+- `pg18-trixie`, `0.8.6-pg18-trixie`
+- `pg18-bookworm`, `0.8.6-pg18-bookworm`, `pg18`, `0.8.6-pg18`
+- `pg17-trixie`, `0.8.6-pg17-trixie`
+- `pg17-bookworm`, `0.8.6-pg17-bookworm`, `pg17`, `0.8.6-pg17`
+- `pg16-trixie`, `0.8.6-pg16-trixie`
+- `pg16-bookworm`, `0.8.6-pg16-bookworm`, `pg16`, `0.8.6-pg16`
+- `pg15-trixie`, `0.8.6-pg15-trixie`
+- `pg15-bookworm`, `0.8.6-pg15-bookworm`, `pg15`, `0.8.6-pg15`
+- `pg14-trixie`, `0.8.6-pg14-trixie`
+- `pg14-bookworm`, `0.8.6-pg14-bookworm`, `pg14`, `0.8.6-pg14`
+- `pg13-trixie`, `0.8.6-pg13-trixie`
+- `pg13-bookworm`, `0.8.6-pg13-bookworm`, `pg13`, `0.8.6-pg13`
 
 You can also build the image manually:
 
 ```sh
-git clone --branch v0.8.2 https://github.com/pgvector/pgvector.git
+git clone --branch v0.8.6 https://github.com/pgvector/pgvector.git
 cd pgvector
 docker build --pull --build-arg PG_MAJOR=18 -t myuser/pgvector .
 ```
@@ -1223,7 +1233,7 @@ Note: Replace `18` with your Postgres server version
 Install the FreeBSD package with:
 
 ```sh
-pkg install postgresql17-pgvector
+pkg install postgresql18-pgvector
 ```
 
 or the port with:
@@ -1282,7 +1292,7 @@ Thanks to:
 - [Using the Triangle Inequality to Accelerate k-means](https://cdn.aaai.org/ICML/2003/ICML03-022.pdf)
 - [k-means++: The Advantage of Careful Seeding](https://theory.stanford.edu/~sergei/papers/kMeansPP-soda.pdf)
 - [Concept Decompositions for Large Sparse Text Data using Clustering](https://www.cs.utexas.edu/users/inderjit/public_papers/concept_mlj.pdf)
-- [Efficient and Robust Approximate Nearest Neighbor Search using Hierarchical Navigable Small World Graphs](https://arxiv.org/ftp/arxiv/papers/1603/1603.09320.pdf)
+- [Efficient and Robust Approximate Nearest Neighbor Search using Hierarchical Navigable Small World Graphs](https://arxiv.org/pdf/1603.09320)
 
 ## History
 
@@ -1329,7 +1339,7 @@ make clean && PG_CFLAGS="-DUSE_ASSERT_CHECKING" make && make install
 To enable benchmarking:
 
 ```sh
-make clean && PG_CFLAGS="-DIVFFLAT_BENCH" make && make install
+make clean && PG_CFLAGS="-DHNSW_BENCH -DIVFFLAT_BENCH" make && make install
 ```
 
 To show memory usage:

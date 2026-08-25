@@ -26,6 +26,12 @@
 #include "parser/scansup.h"
 #endif
 
+#if PG_VERSION_NUM >= 190000
+#define palloc_array_checked(type, count) ((type *) palloc_array(type, count))
+#else
+#define palloc_array_checked(type, count) ((type *) palloc(mul_size(sizeof(type), count)))
+#endif
+
 typedef struct SparseInputElement
 {
 	int32		index;
@@ -148,7 +154,7 @@ SparseVector *
 InitSparseVector(int dim, int nnz)
 {
 	SparseVector *result;
-	int			size;
+	Size		size;
 
 	size = SPARSEVEC_SIZE(nnz);
 	result = (SparseVector *) palloc0(size);
@@ -200,7 +206,8 @@ sparsevec_in(PG_FUNCTION_ARGS)
 {
 	char	   *lit = PG_GETARG_CSTRING(0);
 	int32		typmod = PG_GETARG_INT32(2);
-	long		dim;
+	int			dim;
+	long		ldim;
 	char	   *pt = lit;
 	char	   *stringEnd;
 	SparseVector *result;
@@ -223,7 +230,7 @@ sparsevec_in(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("sparsevec cannot have more than %d non-zero elements", SPARSEVEC_MAX_NNZ)));
 
-	elements = palloc(maxNnz * sizeof(SparseInputElement));
+	elements = palloc_array_checked(SparseInputElement, (Size) maxNnz);
 
 	pt = lit;
 
@@ -250,7 +257,8 @@ sparsevec_in(PG_FUNCTION_ARGS)
 			long		index;
 			float		value;
 
-			if (nnz == maxNnz)
+			/* Safety check */
+			if (nnz >= maxNnz)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
 						 errmsg("ran out of buffer: \"%s\"", lit)));
@@ -308,7 +316,7 @@ sparsevec_in(PG_FUNCTION_ARGS)
 			if (errno == ERANGE && (value == 0 || isinf(value)))
 				ereport(ERROR,
 						(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-						 errmsg("\"%s\" is out of range for type sparsevec", pnstrdup(pt, stringEnd - pt))));
+						 errmsg("\"%s\" is out of range for type sparsevec", pnstrdup(pt, (Size) (stringEnd - pt)))));
 
 			CheckElement(value);
 
@@ -316,7 +324,7 @@ sparsevec_in(PG_FUNCTION_ARGS)
 			if (value != 0)
 			{
 				/* Convert 1-based numbering (SQL) to 0-based (C) */
-				elements[nnz].index = index - 1;
+				elements[nnz].index = (int32) (index - 1);
 				elements[nnz].value = value;
 				nnz++;
 			}
@@ -355,7 +363,7 @@ sparsevec_in(PG_FUNCTION_ARGS)
 		pt++;
 
 	/* Use similar logic as int2vectorin */
-	dim = strtol(pt, &stringEnd, 10);
+	ldim = strtol(pt, &stringEnd, 10);
 
 	if (stringEnd == pt)
 		ereport(ERROR,
@@ -363,10 +371,12 @@ sparsevec_in(PG_FUNCTION_ARGS)
 				 errmsg("invalid input syntax for type sparsevec: \"%s\"", lit)));
 
 	/* Keep in int range for correct error message later */
-	if (dim > INT_MAX)
-		dim = INT_MAX;
-	else if (dim < INT_MIN)
-		dim = INT_MIN;
+	if (ldim > INT_MAX)
+		ldim = INT_MAX;
+	else if (ldim < INT_MIN)
+		ldim = INT_MIN;
+
+	dim = (int) ldim;
 
 	pt = stringEnd;
 
@@ -383,7 +393,7 @@ sparsevec_in(PG_FUNCTION_ARGS)
 	CheckDim(dim);
 	CheckExpectedDim(typmod, dim);
 
-	qsort(elements, nnz, sizeof(SparseInputElement), CompareIndices);
+	qsort(elements, (Size) nnz, sizeof(SparseInputElement), CompareIndices);
 
 	result = InitSparseVector(dim, nnz);
 	rvalues = SPARSEVEC_VALUES(result);
@@ -427,20 +437,20 @@ sparsevec_out(PG_FUNCTION_ARGS)
 	/*
 	 * Need:
 	 *
-	 * nnz * 10 bytes for index (positive integer)
+	 * nnz * 11 bytes for index (includes sign for extra safety)
 	 *
 	 * nnz bytes for :
 	 *
 	 * nnz * (FLOAT_SHORTEST_DECIMAL_LEN - 1) bytes for
 	 * float_to_shortest_decimal_bufn
 	 *
-	 * nnz - 1 bytes for ,
+	 * max(nnz - 1, 0) bytes for ,
 	 *
-	 * 10 bytes for dimensions
+	 * 11 bytes for dimensions (includes sign for extra safety)
 	 *
 	 * 4 bytes for {, }, /, and \0
 	 */
-	buf = (char *) palloc((11 + FLOAT_SHORTEST_DECIMAL_LEN) * sparsevec->nnz + 13);
+	buf = (char *) palloc(add_size(mul_size(12 + FLOAT_SHORTEST_DECIMAL_LEN, (Size) sparsevec->nnz), 15));
 	ptr = buf;
 
 	AppendChar(ptr, '{');
@@ -511,9 +521,9 @@ sparsevec_recv(PG_FUNCTION_ARGS)
 	int32		unused;
 	float	   *values;
 
-	dim = pq_getmsgint(buf, sizeof(int32));
-	nnz = pq_getmsgint(buf, sizeof(int32));
-	unused = pq_getmsgint(buf, sizeof(int32));
+	dim = (int32) pq_getmsgint(buf, sizeof(int32));
+	nnz = (int32) pq_getmsgint(buf, sizeof(int32));
+	unused = (int32) pq_getmsgint(buf, sizeof(int32));
 
 	CheckDim(dim);
 	CheckNnz(nnz, dim);
@@ -530,7 +540,7 @@ sparsevec_recv(PG_FUNCTION_ARGS)
 	/* Binary representation uses zero-based numbering for indices */
 	for (int i = 0; i < nnz; i++)
 	{
-		result->indices[i] = pq_getmsgint(buf, sizeof(int32));
+		result->indices[i] = (int32) pq_getmsgint(buf, sizeof(int32));
 		CheckIndex(result->indices, i, dim);
 	}
 
@@ -560,13 +570,13 @@ sparsevec_send(PG_FUNCTION_ARGS)
 	StringInfoData buf;
 
 	pq_begintypsend(&buf);
-	pq_sendint(&buf, svec->dim, sizeof(int32));
-	pq_sendint(&buf, svec->nnz, sizeof(int32));
-	pq_sendint(&buf, svec->unused, sizeof(int32));
+	pq_sendint32(&buf, (uint32) svec->dim);
+	pq_sendint32(&buf, (uint32) svec->nnz);
+	pq_sendint32(&buf, (uint32) svec->unused);
 
 	/* Binary representation uses zero-based numbering for indices */
 	for (int i = 0; i < svec->nnz; i++)
-		pq_sendint(&buf, svec->indices[i], sizeof(int32));
+		pq_sendint32(&buf, (uint32) svec->indices[i]);
 
 	for (int i = 0; i < svec->nnz; i++)
 		pq_sendfloat4(&buf, values[i]);
@@ -614,6 +624,7 @@ vector_to_sparsevec(PG_FUNCTION_ARGS)
 			nnz++;
 	}
 
+	CheckNnz(nnz, dim);
 	result = InitSparseVector(dim, nnz);
 	values = SPARSEVEC_VALUES(result);
 	for (int i = 0; i < dim; i++)
@@ -622,7 +633,7 @@ vector_to_sparsevec(PG_FUNCTION_ARGS)
 		{
 			/* Safety check */
 			if (j >= result->nnz)
-				elog(ERROR, "safety check failed");
+				elog(ERROR, "index out of bounds");
 
 			result->indices[j] = i;
 			values[j] = vec->x[i];
@@ -657,6 +668,7 @@ halfvec_to_sparsevec(PG_FUNCTION_ARGS)
 			nnz++;
 	}
 
+	CheckNnz(nnz, dim);
 	result = InitSparseVector(dim, nnz);
 	values = SPARSEVEC_VALUES(result);
 	for (int i = 0; i < dim; i++)
@@ -665,7 +677,7 @@ halfvec_to_sparsevec(PG_FUNCTION_ARGS)
 		{
 			/* Safety check */
 			if (j >= result->nnz)
-				elog(ERROR, "safety check failed");
+				elog(ERROR, "index out of bounds");
 
 			result->indices[j] = i;
 			values[j] = HalfToFloat4(vec->x[i]);
@@ -713,20 +725,20 @@ array_to_sparsevec(PG_FUNCTION_ARGS)
 
 #ifdef _MSC_VER
 /* /fp:fast may not propagate +/-Infinity or NaN */
-#define IS_NOT_ZERO(v) (isnan((float) (v)) || isinf((float) (v)) || ((float) (v)) != 0)
+#define IS_NOT_ZERO(v) (isnan(v) || isinf(v) || (v) != 0.0f)
 #else
-#define IS_NOT_ZERO(v) (((float) (v)) != 0)
+#define IS_NOT_ZERO(v) ((v) != 0.0f)
 #endif
 
 	if (ARR_ELEMTYPE(array) == INT4OID)
 	{
 		for (int i = 0; i < nelemsp; i++)
-			nnz += IS_NOT_ZERO(DatumGetInt32(elemsp[i]));
+			nnz += IS_NOT_ZERO((float) DatumGetInt32(elemsp[i]));
 	}
 	else if (ARR_ELEMTYPE(array) == FLOAT8OID)
 	{
 		for (int i = 0; i < nelemsp; i++)
-			nnz += IS_NOT_ZERO(DatumGetFloat8(elemsp[i]));
+			nnz += IS_NOT_ZERO((float) DatumGetFloat8(elemsp[i]));
 	}
 	else if (ARR_ELEMTYPE(array) == FLOAT4OID)
 	{
@@ -736,7 +748,7 @@ array_to_sparsevec(PG_FUNCTION_ARGS)
 	else if (ARR_ELEMTYPE(array) == NUMERICOID)
 	{
 		for (int i = 0; i < nelemsp; i++)
-			nnz += IS_NOT_ZERO(DirectFunctionCall1(numeric_float4, elemsp[i]));
+			nnz += IS_NOT_ZERO(DatumGetFloat4(DirectFunctionCall1(numeric_float4, elemsp[i])));
 	}
 	else
 	{
@@ -745,16 +757,17 @@ array_to_sparsevec(PG_FUNCTION_ARGS)
 				 errmsg("unsupported array type")));
 	}
 
+	CheckNnz(nnz, nelemsp);
 	result = InitSparseVector(nelemsp, nnz);
 	values = SPARSEVEC_VALUES(result);
 
 #define PROCESS_ARRAY_ELEM(elem) \
 	do { \
-		float v = (float) (elem); \
+		float v = (elem); \
 		if (IS_NOT_ZERO(v)) { \
 			/* Safety check */ \
 			if (j >= result->nnz) \
-				elog(ERROR, "safety check failed"); \
+				elog(ERROR, "index out of bounds"); \
 			result->indices[j] = i; \
 			values[j] = v; \
 			j++; \
@@ -764,12 +777,12 @@ array_to_sparsevec(PG_FUNCTION_ARGS)
 	if (ARR_ELEMTYPE(array) == INT4OID)
 	{
 		for (int i = 0; i < nelemsp; i++)
-			PROCESS_ARRAY_ELEM(DatumGetInt32(elemsp[i]));
+			PROCESS_ARRAY_ELEM((float) DatumGetInt32(elemsp[i]));
 	}
 	else if (ARR_ELEMTYPE(array) == FLOAT8OID)
 	{
 		for (int i = 0; i < nelemsp; i++)
-			PROCESS_ARRAY_ELEM(DatumGetFloat8(elemsp[i]));
+			PROCESS_ARRAY_ELEM((float) DatumGetFloat8(elemsp[i]));
 	}
 	else if (ARR_ELEMTYPE(array) == FLOAT4OID)
 	{
@@ -820,8 +833,8 @@ SparsevecL2SquaredDistance(SparseVector * a, SparseVector * b)
 
 	for (int i = 0; i < a->nnz; i++)
 	{
-		int			ai = a->indices[i];
-		int			bi = -1;
+		int32		ai = a->indices[i];
+		int32		bi = -1;
 
 		for (int j = bpos; j < b->nnz; j++)
 		{
@@ -899,11 +912,11 @@ SparsevecInnerProduct(SparseVector * a, SparseVector * b)
 
 	for (int i = 0; i < a->nnz; i++)
 	{
-		int			ai = a->indices[i];
+		int32		ai = a->indices[i];
 
 		for (int j = bpos; j < b->nnz; j++)
 		{
-			int			bi = b->indices[j];
+			int32		bi = b->indices[j];
 
 			/* Only update when the same index */
 			if (ai == bi)
@@ -1015,8 +1028,8 @@ sparsevec_l1_distance(PG_FUNCTION_ARGS)
 
 	for (int i = 0; i < a->nnz; i++)
 	{
-		int			ai = a->indices[i];
-		int			bi = -1;
+		int32		ai = a->indices[i];
+		int32		bi = -1;
 
 		for (int j = bpos; j < b->nnz; j++)
 		{
@@ -1094,7 +1107,7 @@ sparsevec_l2_normalize(PG_FUNCTION_ARGS)
 		for (int i = 0; i < a->nnz; i++)
 		{
 			result->indices[i] = a->indices[i];
-			rx[i] = ax[i] / norm;
+			rx[i] = (float) (ax[i] / norm);
 
 			if (isinf(rx[i]))
 				float_overflow_error();
@@ -1117,7 +1130,7 @@ sparsevec_l2_normalize(PG_FUNCTION_ARGS)
 
 				/* Safety check */
 				if (j >= newResult->nnz)
-					elog(ERROR, "safety check failed");
+					elog(ERROR, "index out of bounds");
 
 				newResult->indices[j] = result->indices[i];
 				nx[j] = rx[i];
