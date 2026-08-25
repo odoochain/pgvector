@@ -12,3 +12,5 @@ regression.*
 *.obj
 *.lib
 *.exp
+/.deps/
+/libvector.a
